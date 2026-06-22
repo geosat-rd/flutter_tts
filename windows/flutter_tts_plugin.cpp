@@ -112,8 +112,9 @@ namespace {
 				{
 					RunOnMainThread([=]() {
 						methodChannel->InvokeMethod("speak.onComplete", NULL);
-						if (awaitSpeakCompletion) {
+						if (awaitSpeakCompletion && speakResult != nullptr) {
 							speakResult->Success(1);
+							speakResult = nullptr;
 						}
 						isSpeaking = false;
 					});
@@ -161,8 +162,9 @@ namespace {
 
 	void FlutterTtsPlugin::stop() {
 	    methodChannel->InvokeMethod("speak.onCancel", NULL);
-        if (awaitSpeakCompletion) {
+        if (awaitSpeakCompletion && speakResult != nullptr) {
             speakResult->Success(1);
+            speakResult = nullptr;
         }
 
 		mPlayer.Close();
@@ -301,6 +303,8 @@ namespace {
 		static void RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar);
 		FlutterTtsPlugin();
 		virtual ~FlutterTtsPlugin();
+		void CompleteSpeakResult();
+		void CompleteSpeech();
 	private:
 		// Called when a method is called on this plugin's channel from Dart.
 		void HandleMethodCall(
@@ -382,6 +386,9 @@ namespace {
 		if (window_proc_id_ != -1 && registrar_ != nullptr) {
 			registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_id_);
 		}
+		if (addWaitHandle != NULL) {
+			UnregisterWait(addWaitHandle);
+		}
 		::CoUninitialize();
 	}
 
@@ -397,21 +404,35 @@ namespace {
 		return std::nullopt;
 	}
 
+	void FlutterTtsPlugin::CompleteSpeakResult() {
+		if (speakResult != nullptr) {
+			speakResult->Success(1);
+			speakResult = nullptr;
+		}
+	}
+
+	void FlutterTtsPlugin::CompleteSpeech() {
+		methodChannel->InvokeMethod("speak.onComplete", NULL);
+	}
+
     void CALLBACK setResult(PVOID lpParam, BOOLEAN TimerOrWaitFired)
     {
-        RunOnMainThread([=]() {
-            flutter::MethodResult<flutter::EncodableValue>* p = (flutter::MethodResult<flutter::EncodableValue>*) lpParam;
-            if (p != nullptr) {
-                p->Success(1);
-            }
-        });
+        FlutterTtsPlugin* plugin = (FlutterTtsPlugin*)lpParam;
+        if (plugin != nullptr) {
+            RunOnMainThread([=]() {
+                plugin->CompleteSpeakResult();
+            });
+        }
     }
 
     void CALLBACK onCompletion(PVOID lpParam, BOOLEAN TimerOrWaitFired)
     {
-        RunOnMainThread([=]() {
-            methodChannel->InvokeMethod("speak.onComplete", NULL);
-        });
+        FlutterTtsPlugin* plugin = (FlutterTtsPlugin*)lpParam;
+        if (plugin != nullptr) {
+            RunOnMainThread([=]() {
+                plugin->CompleteSpeech();
+            });
+        }
     }
 
 	bool FlutterTtsPlugin::speaking()
@@ -435,10 +456,14 @@ namespace {
 		delete[] wstr;
 		HANDLE speakCompletionHandle = pVoice->SpeakCompleteEvent();
 		methodChannel->InvokeMethod("speak.onStart", NULL);
-		RegisterWaitForSingleObject(&addWaitHandle, speakCompletionHandle, (WAITORTIMERCALLBACK)&onCompletion, speakResult.get(), INFINITE, WT_EXECUTEONLYONCE);
+		if (addWaitHandle != NULL) {
+			UnregisterWait(addWaitHandle);
+			addWaitHandle = NULL;
+		}
+		RegisterWaitForSingleObject(&addWaitHandle, speakCompletionHandle, (WAITORTIMERCALLBACK)&onCompletion, this, INFINITE, WT_EXECUTEONLYONCE);
 		if (awaitSpeakCompletion){
 		    speakResult = std::move(result);
-		    RegisterWaitForSingleObject(&addWaitHandle, speakCompletionHandle, (WAITORTIMERCALLBACK)&setResult, speakResult.get(), INFINITE, WT_EXECUTEONLYONCE);
+		    RegisterWaitForSingleObject(&addWaitHandle, speakCompletionHandle, (WAITORTIMERCALLBACK)&setResult, this, INFINITE, WT_EXECUTEONLYONCE);
 		}
 		else result->Success(1);
 	}
@@ -463,6 +488,14 @@ namespace {
 		pVoice->Resume();
 		isPaused = false;
 	    methodChannel->InvokeMethod("speak.onCancel", NULL);
+		if (addWaitHandle != NULL) {
+			UnregisterWait(addWaitHandle);
+			addWaitHandle = NULL;
+		}
+		if (awaitSpeakCompletion && speakResult != nullptr) {
+			speakResult->Success(1);
+			speakResult = nullptr;
+		}
 	}
 	void FlutterTtsPlugin::setVolume(const double newVolume)
 	{
